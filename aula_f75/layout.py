@@ -34,7 +34,8 @@ EFFECTS_LIST: List[EffectSpec] = [
     EffectSpec(15, "rainbow-wheel", "Rainbow Wheel", False, True),
     EffectSpec(16, "waterfall", "Waterfall", True, True),
     EffectSpec(17, "center-flash", "Center Flash", True, True),
-    EffectSpec(32, "custom", "Custom Per-Key RGB", False, False),
+    EffectSpec(18, "aurora", "Effect 18", True, True),
+    EffectSpec(21, "custom", "Custom Per-Key RGB", False, False),
 ]
 
 EFFECTS_BY_ID: Dict[int, EffectSpec] = {e.effect_id: e for e in EFFECTS_LIST}
@@ -44,6 +45,8 @@ EFFECTS_BY_SLUG: Dict[str, EffectSpec] = {e.slug: e for e in EFFECTS_LIST}
 def resolve_effect(value: str | int) -> EffectSpec:
     """Resolve an effect ID or slug (case-insensitive) to an EffectSpec."""
     if isinstance(value, int):
+        if value == 32:
+            return EFFECTS_BY_ID[21]
         if value in EFFECTS_BY_ID:
             return EFFECTS_BY_ID[value]
         return EffectSpec(value, f"effect-{value}", f"Effect {value}", True, True)

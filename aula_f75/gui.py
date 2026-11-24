@@ -270,7 +270,7 @@ class AulaF75Window(Adw.ApplicationWindow):
         self._selected_palette_slot: int = 0
         self._custom_rgb: Tuple[int, int, int] = (0, 220, 255)
         self._current_layer: int = 0
-        self._keymap_buf: bytearray = bytearray(504)
+        self._keymap_buf: bytearray = bytearray(512)
         self._watch_source_id: Optional[int] = None
         self._last_cfg_snapshot: Optional[bytes] = None
         self._mouse_color_rgb: Tuple[int, int, int] = (0, 220, 255)
@@ -610,7 +610,7 @@ class AulaF75Window(Adw.ApplicationWindow):
         box.append(self.pk_canvas)
 
         bottom = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        hint = Gtk.Label(label="Click or drag across keys to paint. Click Apply to save and activate Custom Per-Key mode (32).")
+        hint = Gtk.Label(label="Click or drag across keys to paint. Click Apply to save and activate Custom Per-Key mode (21).")
         hint.add_css_class("dim-label")
         hint.set_hexpand(True)
         hint.set_xalign(0.0)

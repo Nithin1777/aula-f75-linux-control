@@ -6,7 +6,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from aula_f75.hid_protocol import AulaF75Device, AulaF75Error, KEYMAP_LEN, PERKEY_LEN
+from aula_f75.hid_protocol import (
+    CONFIG_LEN,
+    CUSTOM_EFFECT_ID,
+    KEYMAP_LEN,
+    LEGACY_KEYMAP_LEN,
+    MAGIC_TRAILER,
+    PERKEY_LEN,
+    AulaF75Device,
+    AulaF75Error,
+)
 from aula_f75.layout import (
     build_per_key_preset,
     decode_key_entry,
@@ -44,9 +53,28 @@ class DummyDevice(AulaF75Device):
         self.path = "/dev/null"
         self._fd = -1
         self.writes = []
+        self.cfg = bytearray(CONFIG_LEN)
+        self.cfg[126:128] = MAGIC_TRAILER
+        self.keymaps = {0: bytearray(KEYMAP_LEN), 1: bytearray(KEYMAP_LEN)}
+        self.per_key = bytearray(PERKEY_LEN)
+
+    def read_block(self, cmd: int, sub: int = 0, length: int = 512, magic_offset=None) -> bytes:
+        if cmd == 0x84:
+            return bytes(self.cfg)
+        if cmd == 0x83:
+            return bytes(self.keymaps[sub])
+        if cmd == 0x86:
+            return bytes(self.per_key)
+        return bytes(length)
 
     def write_block(self, cmd: int, payload: bytes, sub: int = 0, length=None) -> None:
         self.writes.append((cmd, sub, length if length is not None else len(payload), bytes(payload)))
+        if cmd == 0x04:
+            self.cfg = bytearray(payload)
+        elif cmd == 0x03:
+            self.keymaps[sub] = bytearray(payload)
+        elif cmd == 0x06:
+            self.per_key = bytearray(payload)
 
 
 class DummyMouseDevice(InstantMouseDevice):
@@ -87,13 +115,35 @@ class TestProtocol(unittest.TestCase):
 
     def test_keymap_fn_safety_guard(self) -> None:
         dev = DummyDevice()
+        self.assertEqual(KEYMAP_LEN, 512)
         km = bytearray(KEYMAP_LEN)
         km[0:4] = encode_key_entry("Esc")
+        # Missing 5aa5 signature at [510:512] must fail
+        with self.assertRaises(AulaF75Error):
+            dev.write_keymap(km, layer=0, allow_remove_fn=True)
+        km[510:512] = MAGIC_TRAILER
+        # Missing Fn key on base layer must fail
         with self.assertRaises(AulaF75Error):
             dev.write_keymap(km, layer=0, allow_remove_fn=False)
+        # Adding Fn key allows 512B write
         km[53 * 4 : 53 * 4 + 4] = encode_key_entry("Fn")
         dev.write_keymap(km, layer=0, allow_remove_fn=False)
         self.assertEqual(dev.writes[-1][0], 0x03)
+        self.assertEqual(dev.writes[-1][2], 512)
+        # Legacy 504B buffer auto-upgrades with 5aa5 trailer
+        legacy = bytearray(LEGACY_KEYMAP_LEN)
+        legacy[53 * 4 : 53 * 4 + 4] = encode_key_entry("Fn")
+        dev.write_keymap(legacy, layer=0, allow_remove_fn=False)
+        self.assertEqual(dev.writes[-1][2], 512)
+        self.assertEqual(dev.writes[-1][3][510:512], MAGIC_TRAILER)
+
+    def test_custom_per_key_mode_uses_effect_21_and_flag_9(self) -> None:
+        dev = DummyDevice()
+        dev.ensure_initial_backup = lambda *a, **kw: None  # skip disk in unit test
+        dev.set_per_key_colors({0: (255, 0, 0)}, activate_custom=True)
+        self.assertEqual(dev.cfg[9], 1)
+        self.assertEqual(dev.cfg[10], CUSTOM_EFFECT_ID)
+        self.assertEqual(dev.cfg[11], 0x20)
 
     def test_keycode_roundtrip(self) -> None:
         for spec in ("Esc", "A", "Space", "LCtrl+C", "Fn", "Disabled"):
@@ -103,6 +153,8 @@ class TestProtocol(unittest.TestCase):
 
     def test_effects_colors_and_presets(self) -> None:
         self.assertEqual(resolve_effect("static").effect_id, 1)
+        self.assertEqual(resolve_effect("custom").effect_id, 21)
+        self.assertEqual(resolve_effect(32).effect_id, 21)
         self.assertEqual(resolve_effect("11").slug, "stream")
         self.assertEqual(resolve_key_slot("W"), 14)
         self.assertEqual(format_hex_color(parse_hex_color("#00Ff80")), "#00ff80")

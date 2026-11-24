@@ -154,7 +154,7 @@ def _cmd_perkey(args: argparse.Namespace) -> int:
             brightness=args.brightness,
         )
 
-    active_msg = "and activated Custom mode (32)" if not args.no_activate else "(saved without switching effect)"
+    active_msg = "and activated Custom mode (21)" if not args.no_activate else "(saved without switching effect)"
     print(f"Updated per-key RGB {active_msg}.")
     return 0
 
@@ -464,7 +464,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_pk.add_argument("--all", help="Fill all keys with '#RRGGBB'")
     p_pk.add_argument("--set", dest="set_key", action="append", help="Set KEY=#RRGGBB (repeatable)")
     p_pk.add_argument("-b", "--brightness", type=int, choices=range(0, 10), metavar="0..9")
-    p_pk.add_argument("--no-activate", action="store_true", help="Save per-key map without switching to effect 32")
+    p_pk.add_argument("--no-activate", action="store_true", help="Save per-key map without switching to effect 21")
     p_pk.set_defaults(func=_cmd_perkey)
 
     p_km = sub.add_parser("keymap", help="Inspect or remap keys on Base or Fn layer")

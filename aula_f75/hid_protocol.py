@@ -29,10 +29,14 @@ CMD_READ_PALETTE = 0x8A
 
 CONFIG_LEN = 128
 PALETTE_LEN = 512
-KEYMAP_LEN = 504
+KEYMAP_LEN = 512
+LEGACY_KEYMAP_LEN = 504
 PERKEY_LEN = 378
+CUSTOM_EFFECT_ID = 21
 MAGIC_TRAILER = b"\x5a\xa5"
-SETTLE_DELAY_SEC = 0.045
+
+READ_DELAY_SEC = 0.025
+WRITE_SETTLE_SEC = 0.40
 
 DEFAULT_DATA_DIR = Path.home() / ".local" / "share" / "aula-f75-control"
 INITIAL_BACKUP_PATH = DEFAULT_DATA_DIR / "initial_backup.json"
@@ -87,7 +91,6 @@ def find_aula_f75_hidraw() -> Optional[Dict[str, Any]]:
 
         dev_path = f"/dev/{entry.name}"
         rdesc = _read_bytes(entry / "device" / "report_descriptor")
-        # Vendor interface exposes Report ID 0x06 (0x85 0x06) with 519-byte feature report (0x96 0x07 0x02 0xb1 0x02)
         has_vendor_feature = (b"\x85\x06" in rdesc) and (b"\x96\x07\x02\xb1\x02" in rdesc)
         phys = props.get("HID_PHYS", "")
         is_input1 = phys.endswith("/input1")
@@ -110,6 +113,18 @@ def find_aula_f75_hidraw() -> Optional[Dict[str, Any]]:
 
     candidates.sort(key=lambda c: (not c["has_vendor_feature"], not c["is_input1"], c["path"]))
     return candidates[0]
+
+
+def normalize_keymap_bytes(keymap: bytes | bytearray) -> bytearray:
+    """Normalize a 504B legacy keymap or 512B signed keymap to 512B ending with 5a a5 at [510:512]."""
+    if len(keymap) == LEGACY_KEYMAP_LEN:
+        buf = bytearray(KEYMAP_LEN)
+        buf[:LEGACY_KEYMAP_LEN] = keymap
+        buf[510:512] = MAGIC_TRAILER
+        return buf
+    if len(keymap) == KEYMAP_LEN:
+        return bytearray(keymap)
+    raise AulaF75Error(f"Keymap must be {KEYMAP_LEN} bytes (or legacy {LEGACY_KEYMAP_LEN}), got {len(keymap)}")
 
 
 class AulaF75Device:
@@ -173,18 +188,47 @@ class AulaF75Device:
             pkt[8 : 8 + len(payload)] = payload
         return pkt
 
-    def read_block(self, cmd: int, sub: int = 0, length: int = 512) -> bytes:
+    def read_block(
+        self,
+        cmd: int,
+        sub: int = 0,
+        length: int = 512,
+        magic_offset: Optional[int] = None,
+    ) -> bytes:
         fd = self._ensure_open()
         req = self._build_packet(cmd, sub, length)
-        resp = bytearray(REPORT_SIZE)
-        resp[0] = REPORT_ID
-        try:
-            fcntl.ioctl(fd, _hidiocsfeature(REPORT_SIZE), req)
-            time.sleep(0.005)
-            fcntl.ioctl(fd, _hidiocgfeature(REPORT_SIZE), resp)
-        except OSError as exc:
-            raise AulaF75Error(f"HID read failed (cmd=0x{cmd:02x}, sub={sub}): {exc}") from exc
-        return bytes(resp[8 : 8 + length])
+        expected_hdr = bytes(req[:8])
+
+        last_err: Optional[str] = None
+        for attempt in range(3):
+            resp = bytearray(REPORT_SIZE)
+            resp[0] = REPORT_ID
+            try:
+                fcntl.ioctl(fd, _hidiocsfeature(REPORT_SIZE), bytearray(req))
+                time.sleep(READ_DELAY_SEC)
+                fcntl.ioctl(fd, _hidiocgfeature(REPORT_SIZE), resp)
+            except OSError as exc:
+                last_err = f"HID read failed (cmd=0x{cmd:02x}, sub={sub}): {exc}"
+                time.sleep(0.1)
+                continue
+
+            if bytes(resp[:8]) != expected_hdr:
+                last_err = f"Unexpected HID read header: {bytes(resp[:8]).hex()} (expected {expected_hdr.hex()})"
+                time.sleep(0.1)
+                continue
+
+            payload = bytes(resp[8 : 8 + length])
+            if magic_offset is not None and payload[magic_offset : magic_offset + 2] != MAGIC_TRAILER:
+                last_err = (
+                    f"Missing 5aa5 signature at offset {magic_offset} for cmd=0x{cmd:02x}: "
+                    f"{payload[magic_offset : magic_offset + 2].hex()}"
+                )
+                time.sleep(0.1)
+                continue
+
+            return payload
+
+        raise AulaF75Error(last_err or f"HID read failed after retries (cmd=0x{cmd:02x}, sub={sub})")
 
     def write_block(self, cmd: int, payload: bytes, sub: int = 0, length: Optional[int] = None) -> None:
         fd = self._ensure_open()
@@ -195,16 +239,12 @@ class AulaF75Device:
             fcntl.ioctl(fd, _hidiocsfeature(REPORT_SIZE), pkt)
         except OSError as exc:
             raise AulaF75Error(f"HID write failed (cmd=0x{cmd:02x}, sub={sub}): {exc}") from exc
-        time.sleep(SETTLE_DELAY_SEC)
+        time.sleep(WRITE_SETTLE_SEC)
 
     def read_config(self) -> bytearray:
-        data = bytearray(self.read_block(CMD_READ_CONFIG, sub=0, length=CONFIG_LEN))
+        data = bytearray(self.read_block(CMD_READ_CONFIG, sub=0, length=CONFIG_LEN, magic_offset=126))
         if len(data) != CONFIG_LEN:
             raise AulaF75Error(f"Unexpected config block length: {len(data)}")
-        if data[126:128] != MAGIC_TRAILER:
-            raise AulaF75Error(
-                f"Invalid config sentinel at [126:128]: {data[126:128].hex()} (expected 5aa5)"
-            )
         return data
 
     def write_config(self, cfg: bytes | bytearray) -> None:
@@ -212,16 +252,16 @@ class AulaF75Device:
             raise AulaF75Error(f"Config block must be {CONFIG_LEN} bytes, got {len(cfg)}")
         if bytes(cfg[126:128]) != MAGIC_TRAILER:
             raise AulaF75Error("Refusing to write config without 5aa5 sentinel at [126:128]")
-        self.write_block(CMD_WRITE_CONFIG, bytes(cfg), sub=0, length=CONFIG_LEN)
+        raw = bytes(cfg)
+        self.write_block(CMD_WRITE_CONFIG, raw, sub=0, length=CONFIG_LEN)
+        verify = bytes(self.read_config())
+        if verify != raw:
+            raise AulaF75Error("Config write verification failed (keyboard read-back differs)")
 
     def read_palette(self) -> bytearray:
-        data = bytearray(self.read_block(CMD_READ_PALETTE, sub=0, length=PALETTE_LEN))
+        data = bytearray(self.read_block(CMD_READ_PALETTE, sub=0, length=PALETTE_LEN, magic_offset=506))
         if len(data) != PALETTE_LEN:
             raise AulaF75Error(f"Unexpected palette block length: {len(data)}")
-        if data[506:508] != MAGIC_TRAILER:
-            raise AulaF75Error(
-                f"Invalid palette sentinel at [506:508]: {data[506:508].hex()} (expected 5aa5)"
-            )
         return data
 
     def write_palette(self, palette: bytes | bytearray) -> None:
@@ -229,14 +269,15 @@ class AulaF75Device:
             raise AulaF75Error(f"Palette block must be {PALETTE_LEN} bytes, got {len(palette)}")
         if bytes(palette[506:508]) != MAGIC_TRAILER:
             raise AulaF75Error("Refusing to write palette without 5aa5 sentinel at [506:508]")
-        self.write_block(CMD_WRITE_PALETTE, bytes(palette), sub=0, length=PALETTE_LEN)
+        raw = bytes(palette)
+        self.write_block(CMD_WRITE_PALETTE, raw, sub=0, length=PALETTE_LEN)
+        verify = bytes(self.read_palette())
+        if verify != raw:
+            raise AulaF75Error("Palette write verification failed (keyboard read-back differs)")
 
     def read_per_key_rgb(self) -> Dict[int, Tuple[int, int, int]]:
-        raw = self.read_block(CMD_READ_PERKEY, sub=0, length=0x0180)
-        return {
-            i: (raw[i], raw[126 + i], raw[252 + i])
-            for i in range(126)
-        }
+        raw = self.read_block(CMD_READ_PERKEY, sub=0, length=PERKEY_LEN)
+        return {i: (raw[i], raw[126 + i], raw[252 + i]) for i in range(126)}
 
     def write_per_key_rgb(self, slot_rgb: Dict[int, Tuple[int, int, int]]) -> None:
         buf = bytearray(PERKEY_LEN)
@@ -247,12 +288,16 @@ class AulaF75Device:
             buf[slot] = max(0, min(255, int(r)))
             buf[126 + slot] = max(0, min(255, int(g)))
             buf[252 + slot] = max(0, min(255, int(b)))
-        self.write_block(CMD_WRITE_PERKEY, bytes(buf), sub=0, length=PERKEY_LEN)
+        raw = bytes(buf)
+        self.write_block(CMD_WRITE_PERKEY, raw, sub=0, length=PERKEY_LEN)
+        verify = self.read_block(CMD_READ_PERKEY, sub=0, length=PERKEY_LEN)
+        if verify != raw:
+            raise AulaF75Error("Per-key RGB write verification failed (keyboard read-back differs)")
 
     def read_keymap(self, layer: int = 0) -> bytearray:
         if layer not in (0, 1):
             raise AulaF75Error(f"Layer must be 0 (base) or 1 (fn), got {layer}")
-        return bytearray(self.read_block(CMD_READ_KEYMAP, sub=layer, length=KEYMAP_LEN))
+        return bytearray(self.read_block(CMD_READ_KEYMAP, sub=layer, length=KEYMAP_LEN, magic_offset=510))
 
     def write_keymap(
         self,
@@ -262,18 +307,23 @@ class AulaF75Device:
     ) -> None:
         if layer not in (0, 1):
             raise AulaF75Error(f"Layer must be 0 (base) or 1 (fn), got {layer}")
-        if len(keymap) != KEYMAP_LEN:
-            raise AulaF75Error(f"Keymap must be {KEYMAP_LEN} bytes, got {len(keymap)}")
-        if not any(keymap):
+        buf = normalize_keymap_bytes(keymap)
+        if bytes(buf[510:512]) != MAGIC_TRAILER:
+            raise AulaF75Error("Refusing to write keymap without 5aa5 signature at [510:512]")
+        if not any(buf[:LEGACY_KEYMAP_LEN]):
             raise AulaF75Error("Refusing to write an all-zero keymap")
         if layer == 0 and not allow_remove_fn:
-            has_fn = any(keymap[i : i + 4] == b"\x0d\x00\x00\x00" for i in range(0, KEYMAP_LEN, 4))
+            has_fn = any(buf[i : i + 4] == b"\x0d\x00\x00\x00" for i in range(0, LEGACY_KEYMAP_LEN, 4))
             if not has_fn:
                 raise AulaF75Error(
                     "Safety guard: refusing to write base keymap without an Fn key (0d000000). "
                     "Use --force / allow_remove_fn=True if you really intend this."
                 )
-        self.write_block(CMD_WRITE_KEYMAP, bytes(keymap), sub=layer, length=KEYMAP_LEN)
+        raw = bytes(buf)
+        self.write_block(CMD_WRITE_KEYMAP, raw, sub=layer, length=KEYMAP_LEN)
+        verify = bytes(self.read_keymap(layer=layer))
+        if verify != raw:
+            raise AulaF75Error(f"Keymap layer {layer} write verification failed (keyboard read-back differs)")
 
     def read_status(self) -> Dict[str, Any]:
         raw = self.read_block(CMD_READ_STATUS, sub=0, length=CONFIG_LEN)
@@ -286,7 +336,7 @@ class AulaF75Device:
         effect_id = cfg[10]
         spec = EFFECTS_BY_ID.get(effect_id)
 
-        if 1 <= effect_id <= 20:
+        if 1 <= effect_id <= 18:
             slot_off = 56 + effect_id * 2
             brightness = cfg[slot_off]
             packed = cfg[slot_off + 1]
@@ -346,11 +396,13 @@ class AulaF75Device:
         color_index: Optional[int] = None,
         custom_rgb: Optional[Tuple[int, int, int]] = None,
     ) -> Dict[str, Any]:
+        if effect_id == 32:
+            effect_id = CUSTOM_EFFECT_ID
         if not (0 <= effect_id <= 255):
             raise AulaF75Error(f"effect_id out of range: {effect_id}")
         self.ensure_initial_backup()
 
-        if custom_rgb is not None and 1 <= effect_id <= 20:
+        if custom_rgb is not None and 1 <= effect_id <= 18:
             if color_index is None or color_index >= 7:
                 color_index = 0
             palette = self.read_palette()
@@ -360,14 +412,14 @@ class AulaF75Device:
             palette[off + 1] = max(0, min(255, int(g)))
             palette[off + 2] = max(0, min(255, int(b)))
             self.write_palette(palette)
-            # Handshake sync read before config commit
-            self.read_config()
-            time.sleep(SETTLE_DELAY_SEC)
 
         cfg = self.read_config()
+        cfg[9] = 1 if effect_id == CUSTOM_EFFECT_ID else 0
         cfg[10] = effect_id
 
-        if 1 <= effect_id <= 20:
+        if effect_id == CUSTOM_EFFECT_ID:
+            cfg[11] = 0x20
+        elif 1 <= effect_id <= 18:
             slot_off = 56 + effect_id * 2
             cur_bright = cfg[slot_off]
             cur_packed = cfg[slot_off + 1]
@@ -375,18 +427,21 @@ class AulaF75Device:
             cur_color = cur_packed & 0x0F
 
             new_bright = cur_bright if brightness is None else max(0, min(9, int(brightness)))
-            new_speed = cur_speed if speed is None else max(0, min(4, int(speed)))
-            new_color = cur_color if color_index is None else max(0, min(7, int(color_index)))
+            if effect_id == 1:
+                new_speed = cur_speed
+            else:
+                new_speed = cur_speed if speed is None else max(0, min(4, int(speed)))
+
+            spec = EFFECTS_BY_ID.get(effect_id)
+            if spec and not spec.supports_color:
+                new_color = cur_color
+            else:
+                new_color = cur_color if color_index is None else max(0, min(7, int(color_index)))
 
             cfg[slot_off] = new_bright
             cfg[slot_off + 1] = ((new_speed & 0x0F) << 4) | (new_color & 0x0F)
 
         self.write_config(cfg)
-        verify = self.read_config()
-        if verify[10] != effect_id:
-            raise AulaF75Error(
-                f"Write verification failed: expected effect_id={effect_id}, read back {verify[10]}"
-            )
         return self.get_lighting_state()
 
     def set_per_key_colors(
@@ -400,9 +455,10 @@ class AulaF75Device:
         if activate_custom or brightness is not None:
             cfg = self.read_config()
             if activate_custom:
-                cfg[10] = 32
+                cfg[9] = 1
+                cfg[10] = CUSTOM_EFFECT_ID
+                cfg[11] = 0x20
             if brightness is not None:
-                # Brightness byte used for custom mode slot if applicable
                 cfg[14] = max(0, min(9, int(brightness)))
             self.write_config(cfg)
 
@@ -443,9 +499,10 @@ class AulaF75Device:
 
         self.ensure_initial_backup()
         self.write_palette(palette)
-        self.read_config()
-        time.sleep(SETTLE_DELAY_SEC)
         self.write_block(CMD_WRITE_PERKEY, per_key, sub=0, length=PERKEY_LEN)
+        verify_pk = self.read_block(CMD_READ_PERKEY, sub=0, length=PERKEY_LEN)
+        if verify_pk != per_key:
+            raise AulaF75Error("Per-key RGB restore verification failed")
         self.write_config(cfg)
 
         if restore_keymaps:
