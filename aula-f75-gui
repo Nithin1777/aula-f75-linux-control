@@ -1,0 +1,12 @@
+#!/usr/bin/python3
+"""GUI entrypoint for AULA F75 Control."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from aula_f75.gui import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

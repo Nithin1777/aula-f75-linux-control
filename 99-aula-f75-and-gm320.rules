@@ -1,0 +1,5 @@
+# AULA F75 wired keyboard (258a:010c)
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="010c", MODE="0660", TAG+="uaccess"
+# Ant Esports GM320 / Instant Microelectronics A825 mouse (30fa:1440, 30fa:1040)
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="30fa", ATTRS{idProduct}=="1440", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="30fa", ATTRS{idProduct}=="1040", MODE="0660", TAG+="uaccess"
