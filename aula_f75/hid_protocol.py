@@ -366,6 +366,7 @@ class AulaF75Device:
 
         is_rainbow = color_index >= 7
         active_rgb = None if is_rainbow else colors[color_index]
+        knob_mode = "media" if cfg[26] == 0 else "lighting"
         return {
             "effect_id": effect_id,
             "effect_slug": spec.slug if spec else f"effect-{effect_id}",
@@ -377,8 +378,29 @@ class AulaF75Device:
             "active_rgb": active_rgb,
             "active_hex": format_hex_color(active_rgb) if active_rgb else "rainbow",
             "palette": colors,
+            "knob_mode": knob_mode,
             "raw_config": bytes(cfg),
         }
+
+    def get_knob_mode(self) -> str:
+        cfg = self.read_config()
+        return "media" if cfg[26] == 0 else "lighting"
+
+    def set_knob_mode(self, mode: str) -> str:
+        low = str(mode).strip().lower()
+        if low in ("media", "volume", "0"):
+            val = 0
+            label = "media"
+        elif low in ("lighting", "rgb", "brightness", "1"):
+            val = 1
+            label = "lighting"
+        else:
+            raise AulaF75Error(f"Unknown knob mode: {mode!r} (expected 'media' or 'lighting')")
+        self.ensure_initial_backup()
+        cfg = self.read_config()
+        cfg[26] = val
+        self.write_config(cfg)
+        return label
 
     def ensure_initial_backup(self, path: Path = INITIAL_BACKUP_PATH) -> Optional[Path]:
         if path.exists():

@@ -54,6 +54,8 @@ def _cmd_status(_args: argparse.Namespace) -> int:
     print(f"Brightness: {state['brightness']}/9")
     print(f"Speed:      {state['speed']}/4")
     print(f"Color:      {color_desc}")
+    knob_desc = "media (volume / mute)" if state.get("knob_mode") == "media" else "lighting (brightness / effect)"
+    print(f"Knob Mode:  {knob_desc}")
     pal_str = " ".join(format_hex_color(c) for c in state["palette"])
     print(f"Palette:    {pal_str}")
     return 0
@@ -227,6 +229,14 @@ def _cmd_watch(args: argparse.Namespace) -> int:
             if diffs:
                 print(time.strftime("%H:%M:%S"), " ".join(diffs))
                 prev = cur
+    return 0
+
+
+def _cmd_knob(args: argparse.Namespace) -> int:
+    with AulaF75Device() as dev:
+        mode = dev.set_knob_mode(args.mode)
+    desc = "media (turn = volume, press = mute)" if mode == "media" else "lighting (turn = brightness, press = cycle effect)"
+    print(f"Knob mode set to {desc}.")
     return 0
 
 
@@ -493,6 +503,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch = sub.add_parser("watch", help="Live-monitor config block changes as you press Fn combos")
     p_watch.add_argument("--interval", type=float, default=0.3, help="Polling interval in seconds")
     p_watch.set_defaults(func=_cmd_watch)
+
+    p_knob = sub.add_parser("knob", help="Set rotary knob mode (media volume/mute vs lighting brightness/effect)")
+    p_knob.add_argument("mode", choices=["media", "lighting"], help="Target knob behavior")
+    p_knob.set_defaults(func=_cmd_knob)
 
     # Mouse subcommand group
     p_mouse = sub.add_parser("mouse", help="Configure connected Ant Esports GM320 / Instant A825 mouse (30fa:1440)")

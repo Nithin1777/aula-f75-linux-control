@@ -810,9 +810,16 @@ class AulaF75Window(Adw.ApplicationWindow):
         self.dev_name_row = Adw.ActionRow(title="Device", subtitle="Not connected")
         self.dev_node_row = Adw.ActionRow(title="HID Node", subtitle="—")
         self.dev_batt_row = Adw.ActionRow(title="Battery", subtitle="—")
+        self.knob_mode_row = Adw.ComboRow(
+            title="Rotary Knob Mode",
+            subtitle="Long-press knob or switch here (cfg[26])",
+            model=Gtk.StringList.new(["Media (Volume / Mute)", "Lighting (Brightness / Effect)"]),
+        )
+        self.knob_mode_row.connect("notify::selected", self._on_knob_mode_changed)
         info_group.add(self.dev_name_row)
         info_group.add(self.dev_node_row)
         info_group.add(self.dev_batt_row)
+        info_group.add(self.knob_mode_row)
         box.append(info_group)
 
         bk_group = Adw.PreferencesGroup(
@@ -955,6 +962,17 @@ class AulaF75Window(Adw.ApplicationWindow):
             hex_s = " ".join(f"{b:02x}" for b in chunk)
             lines.append(f"{i:04x}: {hex_s}")
         self.hex_view.get_buffer().set_text("\n".join(lines))
+
+    def _on_knob_mode_changed(self, row: Adw.ComboRow, _pspec) -> None:
+        if self._updating_ui:
+            return
+        mode = "media" if row.get_selected() == 0 else "lighting"
+        try:
+            with AulaF75Device() as dev:
+                dev.set_knob_mode(mode)
+            self._toast(f"Knob set to {mode} mode")
+        except AulaF75Error as exc:
+            self._toast(f"Error: {exc}")
 
     # ---------------- Mouse Page ----------------
     def _build_mouse_page(self) -> Gtk.Widget:
@@ -1321,6 +1339,7 @@ class AulaF75Window(Adw.ApplicationWindow):
                     self.bright_scale.set_value(state["brightness"])
                     self.speed_scale.set_value(state["speed"])
                     self.rainbow_row.set_active(state["is_rainbow"])
+                    self.knob_mode_row.set_selected(0 if state.get("knob_mode", "media") == "media" else 1)
 
                     self._palette_colors = list(state["palette"])
                     if not state["is_rainbow"] and state["color_index"] < 7:
